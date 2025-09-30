@@ -1,10 +1,11 @@
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import copy, collect_libs
+from conan.tools.files import get, copy, collect_libs
+from conan.errors import ConanException, ConanInvalidConfiguration
 import os
 
 
-class AsconConan(ConanFile):
+class AsconConanRecipe(ConanFile):
     name = "ascon"
     # Adjust version as appropriate (could be synchronized with upstream tag)
     version = "1.0.0"
@@ -14,58 +15,76 @@ class AsconConan(ConanFile):
     topics = ("cryptography", "ascon", "aead", "hash", "mac", "prf")
     settings = "os", "arch", "compiler", "build_type"
     package_type = "library"
-    exports_sources = "ascon-c/*", "LICENSE"
-    no_copy_source = True
 
     # Comma separated lists to stay user friendly for CLI overrides.
     options = {
+        "fPIC": [True, False],
+        "shared": [True, False],
         "with_tests": [True, False],
-        "alg_list": "ANY",  # free-form string list or "ANY" for defaults
-        "impl_list": "ANY", # free-form string list or "ANY"
-        "version_list": "ANY",  # free-form string list or "ANY"
+        "with_asconaead128": [True, False],
+        "with_asconhash256": [True, False],
+        "with_asconxof128": [True, False],
+        "with_asconcxof128": [True, False],
+        "with_asconaeadxof128": [True, False],
+        "with_asconmacv13": [True, False],
+        "with_asconprfv13": [True, False],
+        "with_asconprfsv13": [True, False],
+        "optimized": ["size", "speed"]
     }
+
     default_options = {
+        "fPIC": True,
+        "shared": False,
         "with_tests": False,
-        "alg_list": "ANY",
-        "impl_list": "ANY",
-        "version_list": "ANY",
+        "with_asconaead128": True,
+        "with_asconhash256": True,
+        "with_asconxof128": False,
+        "with_asconcxof128": False,
+        "with_asconaeadxof128": False,
+        "with_asconmacv13": False,
+        "with_asconprfv13": False,
+        "with_asconprfsv13": False,
+        "optimized": "speed"
     }
+
+    def source(self):
+        # Please, be aware that using the head of the branch instead of an immutable tag
+        # or commit is a bad practice and not allowed by Conan
+        get(self, "https://github.com/ascon/ascon-c/archive/refs/heads/main.zip",
+                  strip_root=True)
+
+    def config_options(self):
+        if self.settings.os == "Windows":
+            del self.options.fPIC
+
+    def config(self):
+        if self.options.shared:
+            self.options.rm_safe("fPIC")
 
     def layout(self):
         cmake_layout(self)
 
-    def _as_list(self, opt_name, default_semicolon):
-        """Return a semicolon separated string suitable for CMake from a user option.
-        If option is "ANY" use the upstream defaults passed in."""
-        val = str(getattr(self.options, opt_name))
-        if val.upper() == "ANY":
-            return default_semicolon
-        # user supplies comma or semicolon separated list; normalize to semicolons
-        parts = [p.strip() for p in val.replace(";", ",").split(",") if p.strip()]
-        return ";".join(parts) if parts else default_semicolon
-
     def generate(self):
         tc = CMakeToolchain(self)
-        # Upstream default sets in CMakeLists.txt
-        default_versions = "128;256;v13"
-        default_algs = "asconaead128;asconhash256;asconxof128;asconcxof128;asconaeadxof128;asconmacv13;asconprfv13;asconprfsv13"
-        default_impls = "ref;opt64;opt64_lowsize;opt32;opt32_lowsize;bi32;bi32_lowsize;bi32_lowreg;esp32;opt8;opt8_lowsize;bi8"
 
-        tc.variables["VERSION_LIST"] = self._as_list("version_list", default_versions)
-        tc.variables["ALG_LIST"] = self._as_list("alg_list", default_algs)
-        tc.variables["IMPL_LIST"] = self._as_list("impl_list", default_impls)
+        algs = ';'.join((k[5:] for k, v in self.options.items() if k.startswith("with_ascon") and getattr(self.options, k) == True))
+        self.output.info(f"Configuring the following algorithms: {algs}")
 
-        # Disable tests by supplying an empty list when not requested.
-        if self.options.with_tests:
-            # keep upstream default (uses DEFAULT_TESTS from CMakeLists) -> leave TEST_LIST unset
-            pass
-        else:
-            tc.variables["TEST_LIST"] = ""  # empty to skip creating executables
+        if self.settings.arch != "x86_64":
+            raise ConanInvalidConfiguration(f"Unsupported architecture {self.settings.arch}")
+
+        impl = "opt64" + ("_lowsize" if self.options.optimized == "size" else "")
+
+        tc.variables["ALG_LIST"] = algs
+        tc.variables["IMPL_LIST"] = impl
+        if not self.options.with_tests:
+            tc.variables["TEST_LIST"] = ""
+
         tc.generate()
 
     def build(self):
         cmake = CMake(self)
-        cmake.configure(build_script_folder="ascon-c")
+        cmake.configure()
         cmake.build()
 
     def package(self):
@@ -80,13 +99,4 @@ class AsconConan(ConanFile):
             copy(self, pattern, dst=lib_dst, src=self.build_folder, keep_path=False)
 
     def package_info(self):
-        # Collect all produced library names. Order doesn't matter much; adjust if needed.
         self.cpp_info.libs = collect_libs(self)
-        # Provide a root include path so consumers can include directly algorithm headers.
-        # Upstream libraries added their own paths but for consumers we just expose whole tree.
-        # Users must pick the correct header path, e.g., crypto_aead/asconaead128/ref/api.h etc.
-
-        # No system libs or defines required by default; toolchain flags handled by consumer.
-        # Could add components here later if fine-grained linking is needed.
-        pass
-
